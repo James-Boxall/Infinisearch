@@ -1,9 +1,13 @@
 import numpy as np
 import random
+from pathlib import Path
 import string
 import re
 
-with open("filtered_words.txt", "r") as f:
+# Load filtered words list
+PROJECT_DIR = Path(__file__).parent
+path = PROJECT_DIR / "filtered_words.txt"
+with open(path, "r") as f:
     word_list = f.read().splitlines()
 
 class Chunk:
@@ -19,7 +23,6 @@ class Chunk:
         self.min_length = 3
         # Passing other parameters for generation
         self.size = CHUNK_SIZE
-
         # Setting seed so it is effected by chunks x, y position
         self.seed_indp = seed
         self.seed = f"{seed}:{self.x},{self.y}"
@@ -27,7 +30,11 @@ class Chunk:
         # initialise a grid for the word search
         self.grid = np.zeros((self.size, self.size), dtype = int)
         self.border_mask, self.is_word, self.vectors, self.letters, self.weights = self.initial_params()
-
+        # List for generated words:
+        self.word_list = []
+        # start and end co-ordinates of words in chunk
+        self.start_end_cords = []
+        # Dictionaries for converting between letters and numbers
         self.letter_to_number = {chr(i + 64): i for i in range(1, 27)}
         self.number_to_letter = {i: chr(i + 64) for i in range(1, 27)}
 
@@ -124,8 +131,6 @@ class Chunk:
                 if self.vectors[i, k, _index]:
                     for x in range(1, length):
                         new_index = np.array([i, k]) + x * _v
-                        if new_index[0] == 10 or new_index[1] == 10:
-                            print('hi')
                         if self.border_mask[i, k] == self.border_mask[new_index[0], new_index[1]]:
                             self.vectors[i, k, _index] = False
                             break
@@ -210,10 +215,11 @@ class Chunk:
         words_added = 0
         fail = 0
         full_list = []
+        start_end_cords = []
 
-        while words_added < words_wanted and fail < fail_state:
-            i = random.randint(0, test_chunk.size - 1)
-            k = random.randint(0, test_chunk.size - 1)
+        while words_added <= words_wanted and fail <= fail_state:
+            i = random.randint(0, self.size - 1)
+            k = random.randint(0, self.size - 1)
             key_vec = self.key_create(i, k)
 
             if key_vec:
@@ -222,6 +228,11 @@ class Chunk:
                 if _word_list:
                     word = random.choice(_word_list)
                     self.add_word(i, k, word, vector_index)
+                    start_pos = (i, k)
+                    _vector = self.vector_list[vector_index]
+                    end_pos = (i + (len(word)-1)*_vector[0], k + (len(word)-1)*_vector[1])
+                    start_end_cords.append((start_pos, end_pos))
+
                     words_added += 1
                     full_list.append(word)
                 else:
@@ -229,7 +240,8 @@ class Chunk:
             else:
                 fail += 1
 
-        return full_list
+        self.word_list = full_list
+        self.start_end_cords = start_end_cords
 
 
 
@@ -239,24 +251,5 @@ class Chunk:
         return char_array
 
 
-
-
-
-'''
-Code to create and print a simple wordsearch.
-set whatever seed you want to generate a wordsearch. 
-x, y co-ords are for infinite generation. they effect the seed thats used to generate everything.
-the last row of x = n is the same as the first row of x = n+1
-this is a bit hard to see as everything has to be shifted around to be usable going from array format to readable
-formats. It would be smarter to write everything so it directly maps from array -> readable but I didnt so it doesnt
- matter.
-'''
-test_chunk = Chunk(46,15,10, 'SEED')
-
-full_list = test_chunk.word_search_generate(10)
-
-
-print(full_list)
-print(test_chunk.quick_numbers_to_letters())
 
 

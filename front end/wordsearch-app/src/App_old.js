@@ -1,0 +1,427 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+
+const CELL_SIZE = 40;
+const CHUNK_SIZE = 12;
+const CHUNK_OVERLAP = 1;
+const CHUNK_RENDER_SIZE = CHUNK_SIZE - CHUNK_OVERLAP; // 11 cells rendered per chunk
+
+// Flask API call
+const fetchChunk = async (seed, chunkX, chunkY) => {
+  console.log(`Fetching chunk: seed=${seed}, x=${chunkX}, y=${chunkY}`);
+  const response = await fetch(
+    `http://localhost:5000/api/data?seed=${seed}&chunkX=${chunkX}&chunkY=${chunkY}`
+  );
+  
+  if (!response.ok) {
+    throw new Error(`Failed to fetch chunk: ${response.status}`);
+  }
+  
+  const data = await response.json();
+  console.log(`Chunk (${chunkX},${chunkY}) received:`, data);
+  return data; // { letters: [[...]], words: [...] }
+};
+
+const getChunkKey = (x, y) => `${x},${y}`;
+
+const worldToChunk = (worldRow, worldCol) => {
+  const chunkX = Math.floor(worldCol / CHUNK_RENDER_SIZE);
+  const chunkY = Math.floor(worldRow / CHUNK_RENDER_SIZE);
+  const localCol = worldCol - (chunkX * CHUNK_RENDER_SIZE);
+  const localRow = worldRow - (chunkY * CHUNK_RENDER_SIZE);
+  return { chunkX, chunkY, localRow, localCol };
+};
+
+const App = () => {
+  const [seed, setSeed] = useState('seed');
+  const [chunks, setChunks] = useState({});
+  const [foundWords, setFoundWords] = useState([]);
+  const [showWordList, setShowWordList] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [dragStart, setDragStart] = useState(null);
+  const [dragEnd, setDragEnd] = useState(null);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [showMenu, setShowMenu] = useState(false);
+  const [seedInput, setSeedInput] = useState('seed');
+  
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const panStartRef = useRef(null);
+  const loadedChunksRef = useRef(new Set());
+
+  const loadChunk = useCallback(async (chunkX, chunkY) => {
+    const key = getChunkKey(chunkX, chunkY);
+    if (loadedChunksRef.current.has(key)) return;
+    
+    loadedChunksRef.current.add(key);
+    try {
+      const data = await fetchChunk(seed, chunkX, chunkY);
+      setChunks(prev => ({
+        ...prev,
+        [key]: data
+      }));
+    } catch (error) {
+      console.error('Failed to load chunk:', error);
+      loadedChunksRef.current.delete(key);
+    }
+  }, [seed]);
+
+  const getVisibleChunks = useCallback(() => {
+    if (!canvasRef.current) return [];
+    
+    const canvas = canvasRef.current;
+    const startCol = Math.floor(-offset.x / (CHUNK_RENDER_SIZE * CELL_SIZE));
+    const endCol = Math.ceil((canvas.width - offset.x) / (CHUNK_RENDER_SIZE * CELL_SIZE));
+    const startRow = Math.floor(-offset.y / (CHUNK_RENDER_SIZE * CELL_SIZE));
+    const endRow = Math.ceil((canvas.height - offset.y) / (CHUNK_RENDER_SIZE * CELL_SIZE));
+    
+    // Increased buffer from 1 to 3 chunks in each direction for smoother scrolling
+    const buffer = 3;
+    const visible = [];
+    for (let x = startCol - buffer; x <= endCol + buffer; x++) {
+      for (let y = startRow - buffer; y <= endRow + buffer; y++) {
+        visible.push({ x, y });
+      }
+    }
+    return visible;
+  }, [offset]);
+
+  useEffect(() => {
+    const visible = getVisibleChunks();
+    visible.forEach(({ x, y }) => loadChunk(x, y));
+  }, [offset, getVisibleChunks, loadChunk]);
+
+  const screenToWorld = useCallback((screenX, screenY) => {
+    const worldX = screenX - offset.x;
+    const worldY = screenY - offset.y;
+    const col = Math.floor(worldX / CELL_SIZE);
+    const row = Math.floor(worldY / CELL_SIZE);
+    return { row, col };
+  }, [offset]);
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    console.log('Drawing... Chunks loaded:', Object.keys(chunks).length);
+    
+    // Draw grid
+    const visible = getVisibleChunks();
+    console.log('Visible chunks:', visible);
+    
+    visible.forEach(({ x: chunkX, y: chunkY }) => {
+      const key = getChunkKey(chunkX, chunkY);
+      const chunk = chunks[key];
+      
+      console.log(`Chunk ${key}:`, chunk ? 'loaded' : 'not loaded');
+      
+      if (!chunk) return;
+      
+      const baseX = chunkX * CHUNK_RENDER_SIZE * CELL_SIZE + offset.x;
+      const baseY = chunkY * CHUNK_RENDER_SIZE * CELL_SIZE + offset.y;
+      
+      console.log(`Drawing chunk ${key} at base position (${baseX}, ${baseY})`);
+      
+      // Draw cells (skip last row/col to avoid overlap)
+      for (let row = 0; row < CHUNK_RENDER_SIZE; row++) {
+        for (let col = 0; col < CHUNK_RENDER_SIZE; col++) {
+          const x = baseX + col * CELL_SIZE;
+          const y = baseY + row * CELL_SIZE;
+          
+          // Draw cell border
+          ctx.strokeStyle = '#ddd';
+          ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
+          
+          // Draw letter
+          ctx.fillStyle = '#000';
+          ctx.font = '20px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(chunk.letters[row][col], x + CELL_SIZE / 2, y + CELL_SIZE / 2);
+        }
+      }
+    });
+    
+    // Draw found words
+    foundWords.forEach(fw => {
+      const { start, end } = fw;
+      const startX = start.col * CELL_SIZE + CELL_SIZE / 2 + offset.x;
+      const startY = start.row * CELL_SIZE + CELL_SIZE / 2 + offset.y;
+      const endX = end.col * CELL_SIZE + CELL_SIZE / 2 + offset.x;
+      const endY = end.row * CELL_SIZE + CELL_SIZE / 2 + offset.y;
+      
+      ctx.strokeStyle = 'red';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+    });
+    
+    // Draw selection line
+    if (isDragging && dragStart && dragEnd) {
+      const startX = dragStart.col * CELL_SIZE + CELL_SIZE / 2 + offset.x;
+      const startY = dragStart.row * CELL_SIZE + CELL_SIZE / 2 + offset.y;
+      const endX = dragEnd.col * CELL_SIZE + CELL_SIZE / 2 + offset.x;
+      const endY = dragEnd.row * CELL_SIZE + CELL_SIZE / 2 + offset.y;
+      
+      ctx.strokeStyle = 'blue';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.stroke();
+    }
+  }, [chunks, offset, getVisibleChunks, foundWords, isDragging, dragStart, dragEnd]);
+
+  useEffect(() => {
+    draw();
+  }, [draw]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const resizeCanvas = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      draw();
+    };
+    
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+    return () => window.removeEventListener('resize', resizeCanvas);
+  }, [draw]);
+
+  const checkWord = useCallback((start, end) => {
+    const { chunkX, chunkY, localRow: startRow, localCol: startCol } = worldToChunk(start.row, start.col);
+    const key = getChunkKey(chunkX, chunkY);
+    const chunk = chunks[key];
+    
+    if (!chunk) return null;
+    
+    // Check all words in chunk and adjacent chunks
+    const chunksToCheck = [
+      chunk,
+      chunks[getChunkKey(chunkX + 1, chunkY)],
+      chunks[getChunkKey(chunkX - 1, chunkY)],
+      chunks[getChunkKey(chunkX, chunkY + 1)],
+      chunks[getChunkKey(chunkX, chunkY - 1)],
+    ].filter(Boolean);
+    
+    for (const c of chunksToCheck) {
+      for (const word of c.words) {
+        const wordStartWorld = {
+          row: word.start.row + chunkY * CHUNK_RENDER_SIZE,
+          col: word.start.col + chunkX * CHUNK_RENDER_SIZE
+        };
+        const wordEndWorld = {
+          row: word.end.row + chunkY * CHUNK_RENDER_SIZE,
+          col: word.end.col + chunkX * CHUNK_RENDER_SIZE
+        };
+        
+        const matchesForward = 
+          start.row === wordStartWorld.row && start.col === wordStartWorld.col &&
+          end.row === wordEndWorld.row && end.col === wordEndWorld.col;
+          
+        const matchesBackward = 
+          start.row === wordEndWorld.row && start.col === wordEndWorld.col &&
+          end.row === wordStartWorld.row && end.col === wordStartWorld.col;
+        
+        if (matchesForward || matchesBackward) {
+          return {
+            word: word.word,
+            start: matchesForward ? start : end,
+            end: matchesForward ? end : start
+          };
+        }
+      }
+    }
+    
+    return null;
+  }, [chunks]);
+
+  const handleMouseDown = (e) => {
+    if (e.button === 0) { // Left click
+      const rect = canvasRef.current.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const pos = screenToWorld(screenX, screenY);
+      
+      setIsDragging(true);
+      setDragStart(pos);
+      setDragEnd(pos);
+    } else if (e.button === 2) { // Right click
+      setIsPanning(true);
+      panStartRef.current = { x: e.clientX - offset.x, y: e.clientY - offset.y };
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    if (isDragging) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      const pos = screenToWorld(screenX, screenY);
+      setDragEnd(pos);
+    } else if (isPanning && panStartRef.current) {
+      setOffset({
+        x: e.clientX - panStartRef.current.x,
+        y: e.clientY - panStartRef.current.y
+      });
+    }
+  };
+
+  const handleMouseUp = (e) => {
+    if (isDragging && dragStart && dragEnd) {
+      const found = checkWord(dragStart, dragEnd);
+      if (found) {
+        setFoundWords(prev => [...prev, found]);
+      }
+      setIsDragging(false);
+      setDragStart(null);
+      setDragEnd(null);
+    } else if (isPanning) {
+      setIsPanning(false);
+    }
+  };
+
+  const handleContextMenu = (e) => {
+    e.preventDefault();
+  };
+
+  const handleNewSeed = () => {
+    setSeed(seedInput);
+    setChunks({});
+    setFoundWords([]);
+    loadedChunksRef.current.clear();
+    setShowMenu(false);
+  };
+
+  return (
+    <div ref={containerRef} style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative' }}>
+      <canvas
+        ref={canvasRef}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onContextMenu={handleContextMenu}
+        style={{ display: 'block', cursor: isPanning ? 'grabbing' : 'crosshair' }}
+      />
+      
+      {/* Found words counter */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 20,
+          right: 20,
+          background: 'white',
+          padding: '10px 20px',
+          borderRadius: 8,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+          cursor: 'pointer',
+          userSelect: 'none'
+        }}
+        onClick={() => setShowWordList(!showWordList)}
+      >
+        <div style={{ fontWeight: 'bold', fontSize: 18 }}>
+          Words Found: {foundWords.length}
+        </div>
+        {showWordList && (
+          <div style={{ marginTop: 10, borderTop: '1px solid #ddd', paddingTop: 10 }}>
+            {foundWords.map((fw, i) => (
+              <div key={i} style={{ padding: '4px 0' }}>{fw.word}</div>
+            ))}
+          </div>
+        )}
+      </div>
+      
+      {/* Menu button */}
+      <button
+        onClick={() => setShowMenu(!showMenu)}
+        style={{
+          position: 'absolute',
+          top: 20,
+          left: 20,
+          padding: '10px 20px',
+          borderRadius: 8,
+          border: 'none',
+          background: 'white',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+          cursor: 'pointer',
+          fontWeight: 'bold'
+        }}
+      >
+        ☰ Menu
+      </button>
+      
+      {/* Menu */}
+      {showMenu && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 70,
+            left: 20,
+            background: 'white',
+            padding: 20,
+            borderRadius: 8,
+            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+            minWidth: 250
+          }}
+        >
+          <div style={{ marginBottom: 10, fontWeight: 'bold' }}>Change Seed</div>
+          <input
+            type="text"
+            value={seedInput}
+            onChange={(e) => setSeedInput(e.target.value)}
+            style={{
+              width: '100%',
+              padding: 8,
+              marginBottom: 10,
+              borderRadius: 4,
+              border: '1px solid #ddd'
+            }}
+          />
+          <button
+            onClick={handleNewSeed}
+            style={{
+              width: '100%',
+              padding: 10,
+              borderRadius: 4,
+              border: 'none',
+              background: '#007bff',
+              color: 'white',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            Generate New Puzzle
+          </button>
+        </div>
+      )}
+      
+      {/* Instructions */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 20,
+          left: 20,
+          background: 'white',
+          padding: 15,
+          borderRadius: 8,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+          fontSize: 14
+        }}
+      >
+        <div><strong>Left Click + Drag:</strong> Select word</div>
+        <div><strong>Right Click + Drag:</strong> Pan view</div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
